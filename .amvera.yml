@@ -1,0 +1,6 @@
+name: vitamin-reminder-bot
+language: python
+build_command: docker build -t vitamin-bot .
+start_command: docker run -e BOT_TOKEN=$BOT_TOKEN vitamin-bot
+envs:
+  - BOT_TOKEN

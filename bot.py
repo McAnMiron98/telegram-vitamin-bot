@@ -1,5 +1,4 @@
 import os
-import json
 import asyncio
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
@@ -15,20 +14,22 @@ from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 import logging
 
+# Настройка логгирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 
+# Часовой пояс Москвы
 moscow_tz = ZoneInfo("Europe/Moscow")
 
+# Загрузка токена
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 
-SAVE_FILE = "reminders.json"
-
+# Напоминания и состояния
 reminders = {}  # {(chat_id, name): {'time_str': 'HH:MM', 'accepted': False}}
-user_states = {}
+user_states = {}  # {chat_id: {'action': 'add'/'delete', 'name': ..., 'step': ...}}
 
 scheduler = BackgroundScheduler()
 scheduler.start()
@@ -36,57 +37,7 @@ scheduler.start()
 bot_instance = None
 event_loop = None
 
-
-def save_reminders():
-    """Сохраняем reminders в JSON файл."""
-    to_save = []
-    for (chat_id, name), data in reminders.items():
-        to_save.append({
-            "chat_id": chat_id,
-            "name": name,
-            "time_str": data["time_str"],
-            "accepted": data["accepted"]
-        })
-    with open(SAVE_FILE, "w", encoding="utf-8") as f:
-        json.dump(to_save, f, ensure_ascii=False, indent=2)
-
-
-def load_reminders():
-    """Загружаем reminders из JSON и восстанавливаем задачи планировщика."""
-    if not os.path.exists(SAVE_FILE):
-        return
-    try:
-        with open(SAVE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        for item in data:
-            chat_id = item["chat_id"]
-            name = item["name"]
-            time_str = item["time_str"]
-            accepted = item.get("accepted", False)
-            reminders[(chat_id, name)] = {"time_str": time_str, "accepted": accepted}
-            # Восстанавливаем задачу в планировщике
-            hour, minute = map(int, time_str.split(":"))
-            now = datetime.now(moscow_tz)
-            first_time = datetime.combine(now.date(), time(hour, minute), tzinfo=moscow_tz)
-            if first_time < now:
-                first_time += timedelta(days=1)
-            job_id = f"{chat_id}_{name}"
-            try:
-                scheduler.remove_job(job_id)
-            except Exception:
-                pass
-            scheduler.add_job(
-                send_reminder_sync,
-                trigger=IntervalTrigger(hours=1, start_date=first_time, timezone=moscow_tz),
-                id=job_id,
-                replace_existing=True,
-                args=[chat_id, name]
-            )
-        logging.info("Напоминания успешно загружены и задачи восстановлены.")
-    except Exception as e:
-        logging.error(f"Ошибка загрузки напоминаний: {e}")
-
-
+# Главное меню
 def main_menu():
     keyboard = [
         [InlineKeyboardButton("➕ Добавить", callback_data="add")],
@@ -95,7 +46,7 @@ def main_menu():
     ]
     return InlineKeyboardMarkup(keyboard)
 
-
+# Кнопки для напоминания с вариантами "принял" и "отложить"
 def reminder_buttons(name):
     keyboard = [
         [
@@ -109,14 +60,12 @@ def reminder_buttons(name):
     ]
     return InlineKeyboardMarkup(keyboard)
 
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Привет! Я бот, который будет напоминать тебе про витамины 💊\n\n"
         "Выбери действие ниже:",
         reply_markup=main_menu()
     )
-
 
 async def send_reminder_async(chat_id: int, name: str, bot):
     key = (chat_id, name)
@@ -134,14 +83,12 @@ async def send_reminder_async(chat_id: int, name: str, bot):
         logging.error(f"Ошибка при отправке напоминания: {e}")
         return False
 
-
 def send_reminder_sync(chat_id: int, name: str):
     global bot_instance, event_loop
     if bot_instance is None or event_loop is None:
         logging.error("Bot или event loop не инициализированы")
         return
     asyncio.run_coroutine_threadsafe(send_reminder_async(chat_id, name, bot_instance), event_loop)
-
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -156,6 +103,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await list_reminders(update, context, from_callback=True)
     elif data == "delete":
         user_states[chat_id] = {"action": "delete", "step": "waiting_for_name"}
+        # Показываем список витаминов для удаления
         user_vitamins = [(name, info['time_str']) for (uid, name), info in reminders.items() if uid == chat_id]
         if not user_vitamins:
             await query.message.reply_text("У тебя пока нет напоминаний для удаления.", reply_markup=main_menu())
@@ -170,6 +118,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_states.pop(chat_id, None)
         await query.message.reply_text("Отмена.", reply_markup=main_menu())
     elif data.startswith("delvitamin|"):
+        # Удаляем выбранное напоминание
         name = data.split("|", 1)[1]
         key = (chat_id, name)
         job_id = f"{chat_id}_{name}"
@@ -179,20 +128,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         if key in reminders:
             del reminders[key]
-            save_reminders()  # Сохраняем изменения
             await query.message.reply_text(f"🗑 Напоминание '{name}' удалено.", reply_markup=main_menu())
         else:
             await query.message.reply_text(f"❌ Напоминание '{name}' не найдено.", reply_markup=main_menu())
         user_states.pop(chat_id, None)
     elif data.startswith("accepted|"):
+        # Пользователь подтвердил прием витамина
         name = data.split("|", 1)[1]
         key = (chat_id, name)
         if key in reminders:
+            # Переносим на следующий день
             time_str = reminders[key]['time_str']
             hour, minute = map(int, time_str.split(":"))
             now = datetime.now(moscow_tz)
             next_time = datetime.combine(now.date(), time(hour, minute), tzinfo=moscow_tz) + timedelta(days=1)
-            reminders[key]['accepted'] = False
+            reminders[key]['accepted'] = False  # Сброс принятия, напоминание активное
 
             job_id = f"{chat_id}_{name}"
             try:
@@ -206,12 +156,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 replace_existing=True,
                 args=[chat_id, name]
             )
-            save_reminders()
 
             await query.message.reply_text(f"✅ Отлично! Я запомнил, что ты принял {name}. Напоминание перенесено на следующий день.", reply_markup=main_menu())
         else:
             await query.message.reply_text(f"❌ Напоминание '{name}' не найдено.", reply_markup=main_menu())
     elif data.startswith("repeat|"):
+        # Пользователь хочет отложить напоминание
         parts = data.split("|")
         if len(parts) != 3:
             await query.message.reply_text("❗ Некорректная команда.", reply_markup=main_menu())
@@ -228,12 +178,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(f"❌ Напоминание '{name}' не найдено.", reply_markup=main_menu())
             return
 
+        # Удаляем текущую задачу (если есть)
         job_id = f"{chat_id}_{name}"
         try:
             scheduler.remove_job(job_id)
         except Exception:
             pass
 
+        # Запускаем новую задачу с отложенным временем
         run_time = datetime.now(moscow_tz) + timedelta(minutes=delay_min)
         scheduler.add_job(
             send_reminder_sync,
@@ -243,8 +195,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             args=[chat_id, name]
         )
 
-        await query.message.reply_text(f"⏰ Напоминание для {name} отложено на {delay_min} минут.", reply_markup=main_menu())
+        # Состояние accepted не меняем, чтобы напоминание не отключалось
 
+        await query.message.reply_text(f"⏰ Напоминание для {name} отложено на {delay_min} минут.", reply_markup=main_menu())
 
 async def handle_user_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -252,9 +205,10 @@ async def handle_user_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     state = user_states.get(chat_id)
 
-    # Обработка текста "витамин принял"
+    # Принятие витамина в свободной форме (текстом)
     for (uid, name), data in reminders.items():
         if uid == chat_id and text.lower() == f"{name.lower()} принял":
+            # Переносим на следующий день, аналогично кнопке "Принял"
             time_str = data['time_str']
             hour, minute = map(int, time_str.split(":"))
             now = datetime.now(moscow_tz)
@@ -273,7 +227,6 @@ async def handle_user_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 replace_existing=True,
                 args=[chat_id, name]
             )
-            save_reminders()
 
             await update.message.reply_text(f"✅ Отлично! Я запомнил, что ты принял {name}. Напоминание перенесено на следующий день.", reply_markup=main_menu())
             return
@@ -313,14 +266,13 @@ async def handle_user_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     args=[chat_id, name]
                 )
 
-                save_reminders()
-
                 await update.message.reply_text(f"✅ Напоминание для {name} добавлено на {time_str} (МСК).", reply_markup=main_menu())
                 del user_states[chat_id]
             except Exception as e:
                 await update.message.reply_text(f"❗ Ошибка: {e}")
 
     elif state["action"] == "delete":
+        # В режиме удаления теперь реализовано через кнопки, но если пользователь введет текст, то:
         name = text
         key = (chat_id, name)
         job_id = f"{chat_id}_{name}"
@@ -332,12 +284,10 @@ async def handle_user_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if key in reminders:
             del reminders[key]
-            save_reminders()
             await update.message.reply_text(f"🗑 Напоминание '{name}' удалено.", reply_markup=main_menu())
         else:
             await update.message.reply_text(f"❌ Напоминание '{name}' не найдено.", reply_markup=main_menu())
         del user_states[chat_id]
-
 
 async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE, from_callback=False):
     chat_id = update.effective_chat.id
@@ -353,11 +303,8 @@ async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE, fro
     else:
         await update.message.reply_text(text, reply_markup=main_menu())
 
-
 def main():
     global bot_instance, event_loop
-    load_reminders()  # Загружаем напоминания перед стартом
-
     app = ApplicationBuilder().token(TOKEN).build()
     bot_instance = app.bot
     event_loop = asyncio.get_event_loop()
@@ -368,7 +315,6 @@ def main():
 
     print("🤖 Бот запущен...")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
